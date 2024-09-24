@@ -9,11 +9,12 @@ screen = pygame.display.set_mode((width, height))
 clock = pygame.time.Clock()
 
 # Parameters
-num_agents = 50
-agent_radius = 5
-max_speed = 4
-max_force = 0.05
+num_agents = 100
+agent_radius = 3
+max_speed = 5
+max_force = 0.1  # Reduced for smoother, gradual force
 collision_distance = 3 * agent_radius  # Collision distance threshold
+view_distance = 300  # How far agents can see to align and cohere with each other
 
 # Agent class
 class Agent:
@@ -27,9 +28,8 @@ class Agent:
         if self.velocity.length() > max_speed:
             self.velocity.scale_to_length(max_speed)
         self.position += self.velocity
-        self.acceleration *= 0
+        self.acceleration *= 0  # Reset acceleration after each frame
         self.wrap_edges()
-        self.avoid_collisions()
 
     def apply_force(self, force):
         if force is not None:
@@ -45,30 +45,41 @@ class Agent:
         elif self.position.y > height:
             self.position.y = 0
 
-    def avoid_collisions(self):
+    def avoid_collisions(self, agents):
+        separation_force = pygame.Vector2(0, 0)
+        count = 0
+
         for other in agents:
             if other != self:
                 dist = distance(self, other)
-                if dist < collision_distance:
-                    # Move agent away from the other agent
-                    overlap = collision_distance - dist
-                    direction = (self.position - other.position).normalize()
-                    self.position += direction * (overlap / 2)  # Adjust position to avoid overlap
-                    other.position -= direction * (overlap / 2)  # Adjust the other agent's position
+                if dist < collision_distance and dist > 0:
+                    # Compute the repulsion force (away from the other agent)
+                    repulsion = (self.position - other.position).normalize() / dist
+                    separation_force += repulsion
+                    count += 1
+
+        if count > 0:
+            separation_force /= count
+            if separation_force.length() > 0:
+                separation_force = separation_force.normalize() * max_force * 2
+            self.apply_force(separation_force)
 
     def draw(self):
-        # Draw agent as "<" shape
-        angle = self.velocity.as_polar()[1]  # Get direction of movement
-        length = agent_radius * 2
-        points = [
-            pygame.Vector2(self.position.x + length * math.cos(math.radians(angle - 90)),
-                           self.position.y + length * math.sin(math.radians(angle - 90))),
-            pygame.Vector2(self.position.x + length * math.cos(math.radians(angle + 90)),
-                           self.position.y + length * math.sin(math.radians(angle + 90))),
-            pygame.Vector2(self.position.x + length * math.cos(math.radians(angle)),
-                           self.position.y + length * math.sin(math.radians(angle)))
-        ]
-        pygame.draw.polygon(screen, (255, 255, 255), [(int(p.x), int(p.y)) for p in points])
+        # Corrected rotation to point in velocity direction
+        if self.velocity.length() > 0:
+            angle = math.degrees(math.atan2(-self.velocity.y, self.velocity.x))  # Correct angle
+
+            length = agent_radius * 2
+            # Triangle points pointing in the direction of velocity
+            points = [
+                pygame.Vector2(self.position.x + length * math.cos(math.radians(angle)),
+                               self.position.y + length * math.sin(math.radians(angle))),
+                pygame.Vector2(self.position.x + length * math.cos(math.radians(angle + 140)),
+                               self.position.y + length * math.sin(math.radians(angle + 140))),
+                pygame.Vector2(self.position.x + length * math.cos(math.radians(angle - 140)),
+                               self.position.y + length * math.sin(math.radians(angle - 140)))
+            ]
+            pygame.draw.polygon(screen, (255, 255, 255), [(int(p.x), int(p.y)) for p in points])
 
 def distance(a, b):
     return pygame.Vector2(a.position - b.position).length()
@@ -83,29 +94,36 @@ def apply_flocking_rules(agents):
         for other in agents:
             if other != agent:
                 d = distance(agent, other)
-                if d < 50:
-                    if d > 0:
+                if d < view_distance:  # Consider only agents within view distance
+                    if d > 0 and d < collision_distance:
+                        # Separation: steer away from nearby agents
                         separation_vector = (agent.position - other.position)
                         separation += separation_vector.normalize() / d
+                    # Alignment: steer towards average velocity of nearby agents
                     alignment += other.velocity
+                    # Cohesion: steer towards the center of nearby agents
                     cohesion += other.position
                     count += 1
-        
+
         if count > 0:
-            separation_length = separation.length()
-            if separation_length > 0:
-                separation = separation.normalize() * min(separation_length, max_force)
+            # Separation
+            if separation.length() > 0:
+                separation = separation.normalize() * max_force * 2
 
-            alignment = (alignment / count).normalize() * max_speed
-            cohesion = ((cohesion / count) - agent.position).normalize() * max_speed
-            alignment -= agent.velocity
-            cohesion -= agent.velocity
-
-            separation = separation.scale_to_length(max_force)
+            # Alignment
+            alignment /= count
+            alignment = (alignment.normalize() * max_speed) - agent.velocity
             alignment = alignment.scale_to_length(max_force)
+
+            # Cohesion
+            cohesion = (cohesion / count) - agent.position
+            if cohesion.length() > 0:
+                cohesion = cohesion.normalize() * max_speed
+            cohesion = cohesion - agent.velocity
             cohesion = cohesion.scale_to_length(max_force)
 
-            agent.apply_force(separation)
+            # Apply forces
+            agent.apply_force(separation * 1.5)  # Separation is more important
             agent.apply_force(alignment)
             agent.apply_force(cohesion)
 
@@ -126,16 +144,17 @@ def main():
         apply_flocking_rules(agents)
 
         for agent in agents:
+            # Make agents move towards the mouse
             direction_to_mouse = pygame.Vector2(mouse_x, mouse_y) - agent.position
             if direction_to_mouse.length() > 0:
-                direction_to_mouse.normalize_ip()
-                direction_to_mouse *= max_speed
-                force = direction_to_mouse - agent.velocity
-                force_length = force.length()
-                if force_length > 0:
-                    force = force.normalize() * min(force_length, max_force)
-                agent.apply_force(force)
-            
+                direction_to_mouse = direction_to_mouse.normalize() * max_speed
+                steering_force = direction_to_mouse - agent.velocity
+                if steering_force.length() > 0:
+                    steering_force = steering_force.normalize() * max_force
+                agent.apply_force(steering_force)
+
+            # Handle collision avoidance
+            agent.avoid_collisions(agents)
             agent.update()
             agent.draw()
 
